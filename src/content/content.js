@@ -17,7 +17,7 @@
       opacity: 0.9,
       speed: 140,
       density: 50,
-      maxFps: 30,
+      maxFps: 45,
       blockedKeywords: []
     },
     events: [],
@@ -26,6 +26,9 @@
     lastRenderTs: 0,
     lastVideoTime: 0,
     trackCursor: 0,
+    hiddenSourceVideo: null,
+    hiddenSourceOriginalStyle: "",
+    laneCount: 0,
     debug: false
   };
 
@@ -56,12 +59,13 @@
 
   initStorageWatcher();
   initUrlWatcher();
+  initNativePiPHook();
 
-  async function startPiP() {
+  async function startPiP(forcedVideo = null) {
     if (STATE.running) return;
     ensureSupported();
     STATE.site = detectSite();
-    const video = findVideoElement();
+    const video = forcedVideo || findVideoElement();
     if (!video) throw new Error("未找到可用视频元素，请先播放视频后重试");
 
     STATE.sourceVideo = video;
@@ -83,6 +87,7 @@
     mountPiPWindow(pipWindow, video);
     STATE.pipWindow = pipWindow;
     STATE.running = true;
+    hideSourceVideo(video);
     STATE.lastRenderTs = 0;
     renderLoop(performance.now());
     log(`启动完成，site=${STATE.site} events=${STATE.events.length}`);
@@ -103,10 +108,12 @@
     STATE.pipVideo = null;
     STATE.danmakuCanvas = null;
     STATE.danmakuCtx = null;
+    restoreSourceVideo();
   }
 
   function mountPiPWindow(pipWindow, sourceVideo) {
     const doc = pipWindow.document;
+    doc.title = "DanmakuPiP";
     doc.head.innerHTML = "";
     doc.body.innerHTML = "";
     doc.body.style.margin = "0";
@@ -151,6 +158,7 @@
   function resizeCanvas(canvas, pipWindow) {
     canvas.width = Math.max(320, pipWindow.innerWidth);
     canvas.height = Math.max(180, pipWindow.innerHeight);
+    STATE.laneCount = Math.max(4, Math.floor(canvas.height / Math.max(28, STATE.settings.fontSize + 8)));
   }
 
   function renderLoop(now) {
@@ -206,11 +214,10 @@
     const canvas = STATE.danmakuCanvas;
     const fontSize = clampNumber(STATE.settings.fontSize, 14, 48, 24);
     const speed = clampNumber(STATE.settings.speed, 80, 240, 140);
-    const textWidth = estimateTextWidth(event.text, fontSize);
+    const textWidth = measureTextWidth(event.text, fontSize);
     const trackHeight = Math.max(28, fontSize + 8);
-    const trackCount = Math.max(4, Math.floor(canvas.height / trackHeight));
-    const lane = STATE.trackCursor % trackCount;
-    STATE.trackCursor += 1;
+    const trackCount = Math.max(4, STATE.laneCount || Math.floor(canvas.height / trackHeight));
+    const lane = chooseLane(trackCount, canvas.width);
     const y = Math.min(canvas.height - 8, lane * trackHeight + fontSize + 2);
 
     if (event.mode === "top" || event.mode === "bottom") {
@@ -219,7 +226,9 @@
         x: Math.max(8, (canvas.width - textWidth) / 2),
         y: event.mode === "top" ? fontSize + 6 : canvas.height - 10,
         ttl: 2.4,
-        speed: 0
+        speed: 0,
+        textWidth,
+        lane
       };
     }
     return {
@@ -228,7 +237,8 @@
       y,
       ttl: 8.5,
       speed,
-      textWidth
+      textWidth,
+      lane
     };
   }
 
@@ -253,11 +263,13 @@
     const opacity = clampNumber(STATE.settings.opacity, 0.2, 1, 0.9);
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.font = `${fontSize}px sans-serif`;
+    ctx.font = `600 ${fontSize}px "Microsoft YaHei","PingFang SC","Helvetica Neue",Arial,sans-serif`;
     ctx.textBaseline = "alphabetic";
     ctx.globalAlpha = opacity;
     ctx.lineWidth = Math.max(2, Math.floor(fontSize / 8));
     ctx.strokeStyle = "rgba(0,0,0,0.75)";
+    ctx.shadowColor = "rgba(0,0,0,0.45)";
+    ctx.shadowBlur = Math.max(2, Math.floor(fontSize / 6));
 
     for (const item of STATE.active) {
       ctx.fillStyle = item.color || "#FFFFFF";
@@ -265,6 +277,7 @@
       ctx.fillText(item.text, item.x, item.y);
     }
     ctx.globalAlpha = 1;
+    ctx.shadowBlur = 0;
   }
 
   async function loadDanmakuEvents() {
@@ -291,12 +304,14 @@
     if (!STATE.running) return;
     const newVideo = findVideoElement();
     if (!newVideo) return;
+    restoreSourceVideo();
     STATE.site = detectSite();
     STATE.sourceVideo = newVideo;
     STATE.events = await loadDanmakuEvents();
     STATE.active = [];
     STATE.spawnedIds.clear();
     STATE.lastVideoTime = Number(newVideo.currentTime || 0);
+    hideSourceVideo(newVideo);
     log(`已重载：site=${STATE.site}, events=${STATE.events.length}`);
   }
 
@@ -338,13 +353,35 @@
     }, 1000);
   }
 
+  function initNativePiPHook() {
+    document.addEventListener(
+      "enterpictureinpicture",
+      async (event) => {
+        if (STATE.running) return;
+        const target = event && event.target;
+        if (!(target instanceof HTMLVideoElement)) return;
+        try {
+          if (document.pictureInPictureElement) {
+            await document.exitPictureInPicture();
+          }
+        } catch (_error) {
+          log("退出原生PiP失败，将继续尝试DocPiP");
+        }
+        startPiP(target).catch((error) => {
+          log(`原生PiP接管失败: ${safeError(error)}`);
+        });
+      },
+      true
+    );
+  }
+
   async function loadSettings() {
     const defaults = {
       fontSize: 24,
       opacity: 0.9,
       speed: 140,
       density: 50,
-      maxFps: 30,
+      maxFps: 45,
       blockedKeywords: [],
       debug: false
     };
@@ -414,6 +451,62 @@
 
   function estimateTextWidth(text, fontSize) {
     return Math.max(80, String(text || "").length * Math.floor(fontSize * 0.62));
+  }
+
+  function measureTextWidth(text, fontSize) {
+    const ctx = STATE.danmakuCtx;
+    if (!ctx) return estimateTextWidth(text, fontSize);
+    ctx.save();
+    ctx.font = `600 ${fontSize}px "Microsoft YaHei","PingFang SC","Helvetica Neue",Arial,sans-serif`;
+    const width = Math.ceil(ctx.measureText(String(text || "")).width);
+    ctx.restore();
+    return Math.max(80, width);
+  }
+
+  function chooseLane(trackCount, canvasWidth) {
+    const laneRightEdges = Array(trackCount).fill(-Infinity);
+    for (const item of STATE.active) {
+      if (item.mode !== "scroll") continue;
+      const lane = Number(item.lane || 0);
+      const right = item.x + (item.textWidth || 120);
+      laneRightEdges[lane] = Math.max(laneRightEdges[lane], right);
+    }
+    const preferredThreshold = canvasWidth * 0.7;
+    let bestLane = 0;
+    let bestEdge = Number.POSITIVE_INFINITY;
+    for (let lane = 0; lane < trackCount; lane += 1) {
+      const edge = laneRightEdges[lane];
+      if (edge < preferredThreshold) {
+        return lane;
+      }
+      if (edge < bestEdge) {
+        bestEdge = edge;
+        bestLane = lane;
+      }
+    }
+    return bestLane;
+  }
+
+  function hideSourceVideo(video) {
+    if (!(video instanceof HTMLVideoElement)) return;
+    if (STATE.hiddenSourceVideo === video) return;
+    restoreSourceVideo();
+    STATE.hiddenSourceVideo = video;
+    STATE.hiddenSourceOriginalStyle = video.getAttribute("style") || "";
+    video.style.visibility = "hidden";
+    video.style.pointerEvents = "none";
+  }
+
+  function restoreSourceVideo() {
+    const video = STATE.hiddenSourceVideo;
+    if (!video) return;
+    if (STATE.hiddenSourceOriginalStyle) {
+      video.setAttribute("style", STATE.hiddenSourceOriginalStyle);
+    } else {
+      video.removeAttribute("style");
+    }
+    STATE.hiddenSourceVideo = null;
+    STATE.hiddenSourceOriginalStyle = "";
   }
 
   function clampNumber(raw, min, max, fallback) {

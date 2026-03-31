@@ -15,7 +15,7 @@ const DEFAULTS = {
   opacity: 0.9,
   speed: 140,
   density: 50,
-  maxFps: 30,
+  maxFps: 45,
   blockedKeywords: [],
   debug: false
 };
@@ -45,7 +45,7 @@ async function save() {
     opacity: toNum(ids.opacity.value, 0.9),
     speed: toNum(ids.speed.value, 140),
     density: toNum(ids.density.value, 50),
-    maxFps: toNum(ids.maxFps.value, 30),
+    maxFps: toNum(ids.maxFps.value, 45),
     blockedKeywords: keywords,
     debug: ids.debug.checked
   };

@@ -31,7 +31,7 @@
     hiddenSourceVideo: null,
     hiddenSourceOriginalStyle: "",
     laneCount: 0,
-    nativeTakeoverInProgress: false,
+    controlUnsubscribers: [],
     debug: false
   };
 
@@ -62,7 +62,7 @@
 
   initStorageWatcher();
   initUrlWatcher();
-  initNativePiPHook();
+  initPiPButtonHijack();
 
   async function startPiP(forcedVideo = null, options = {}) {
     if (STATE.running) return;
@@ -103,6 +103,7 @@
     STATE.running = true;
     hideSourceVideo(video);
     STATE.lastRenderTs = 0;
+    bindVideoControlEvents();
     renderLoop(performance.now());
     log(`启动完成，site=${STATE.site} events=${STATE.events.length}`);
   }
@@ -122,6 +123,7 @@
     STATE.pipVideo = null;
     STATE.danmakuCanvas = null;
     STATE.danmakuCtx = null;
+    cleanupVideoControlEvents();
     restoreSourceVideo();
   }
 
@@ -138,6 +140,7 @@
     container.style.position = "relative";
     container.style.width = "100vw";
     container.style.height = "100vh";
+    container.style.overflow = "hidden";
 
     const pipVideo = doc.createElement("video");
     pipVideo.muted = true;
@@ -156,8 +159,56 @@
     canvas.style.height = "100%";
     canvas.style.pointerEvents = "none";
 
+    const controls = doc.createElement("div");
+    controls.style.position = "absolute";
+    controls.style.left = "0";
+    controls.style.right = "0";
+    controls.style.bottom = "0";
+    controls.style.height = "42px";
+    controls.style.display = "flex";
+    controls.style.alignItems = "center";
+    controls.style.gap = "6px";
+    controls.style.padding = "4px 8px";
+    controls.style.background = "linear-gradient(transparent, rgba(0,0,0,0.72))";
+    controls.style.zIndex = "9";
+    controls.style.boxSizing = "border-box";
+    controls.style.fontFamily = '"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif';
+
+    const backBtn = makeControlButton(doc, "⏪10");
+    const playPauseBtn = makeControlButton(doc, "⏸");
+    const forwardBtn = makeControlButton(doc, "10⏩");
+    const muteBtn = makeControlButton(doc, "🔊");
+    const volume = doc.createElement("input");
+    volume.type = "range";
+    volume.min = "0";
+    volume.max = "1";
+    volume.step = "0.05";
+    volume.value = String(sourceVideo.muted ? 0 : sourceVideo.volume);
+    volume.style.width = "84px";
+    const speed = doc.createElement("select");
+    ["1", "1.25", "1.5", "2"].forEach((v) => {
+      const option = doc.createElement("option");
+      option.value = v;
+      option.textContent = `${v}x`;
+      speed.appendChild(option);
+    });
+    speed.value = String(sourceVideo.playbackRate || 1);
+    speed.style.height = "28px";
+    speed.style.borderRadius = "6px";
+    speed.style.border = "1px solid rgba(255,255,255,0.35)";
+    speed.style.background = "rgba(20,20,20,0.7)";
+    speed.style.color = "#fff";
+
+    controls.appendChild(backBtn);
+    controls.appendChild(playPauseBtn);
+    controls.appendChild(forwardBtn);
+    controls.appendChild(muteBtn);
+    controls.appendChild(volume);
+    controls.appendChild(speed);
+
     container.appendChild(pipVideo);
     container.appendChild(canvas);
+    container.appendChild(controls);
     doc.body.appendChild(container);
 
     pipWindow.addEventListener("resize", () => resizeCanvas(canvas, pipWindow), { passive: true });
@@ -167,6 +218,52 @@
     STATE.pipVideo = pipVideo;
     STATE.danmakuCanvas = canvas;
     STATE.danmakuCtx = canvas.getContext("2d");
+
+    backBtn.addEventListener("click", () => {
+      sourceVideo.currentTime = Math.max(0, Number(sourceVideo.currentTime || 0) - 10);
+    });
+    playPauseBtn.addEventListener("click", () => {
+      if (sourceVideo.paused) {
+        sourceVideo.play().catch(() => undefined);
+      } else {
+        sourceVideo.pause();
+      }
+    });
+    forwardBtn.addEventListener("click", () => {
+      const max = Number.isFinite(sourceVideo.duration) ? sourceVideo.duration : Number(sourceVideo.currentTime || 0) + 10;
+      sourceVideo.currentTime = Math.min(max, Number(sourceVideo.currentTime || 0) + 10);
+    });
+    muteBtn.addEventListener("click", () => {
+      sourceVideo.muted = !sourceVideo.muted;
+    });
+    volume.addEventListener("input", () => {
+      const v = clampNumber(volume.value, 0, 1, 1);
+      sourceVideo.volume = v;
+      sourceVideo.muted = v === 0;
+    });
+    speed.addEventListener("change", () => {
+      const next = clampNumber(speed.value, 0.5, 4, 1);
+      sourceVideo.playbackRate = next;
+    });
+
+    const syncControls = () => {
+      playPauseBtn.textContent = sourceVideo.paused ? "▶" : "⏸";
+      muteBtn.textContent = sourceVideo.muted || sourceVideo.volume <= 0 ? "🔇" : "🔊";
+      volume.value = String(sourceVideo.muted ? 0 : sourceVideo.volume);
+      speed.value = String(sourceVideo.playbackRate || 1);
+    };
+    syncControls();
+
+    const listeners = [
+      ["play", syncControls],
+      ["pause", syncControls],
+      ["volumechange", syncControls],
+      ["ratechange", syncControls]
+    ];
+    listeners.forEach(([name, fn]) => sourceVideo.addEventListener(name, fn));
+    STATE.controlUnsubscribers.push(() => {
+      listeners.forEach(([name, fn]) => sourceVideo.removeEventListener(name, fn));
+    });
   }
 
   function resizeCanvas(canvas, pipWindow) {
@@ -189,20 +286,22 @@
     STATE.lastRenderTs = now;
 
     const current = Number(STATE.sourceVideo.currentTime || 0);
-    if (current < STATE.lastVideoTime - 1.2 || Math.abs(current - STATE.lastVideoTime) > 25) {
+    if (Math.abs(current - STATE.lastVideoTime) > 1.2) {
       STATE.spawnedIds.clear();
       STATE.active = [];
     }
     STATE.lastVideoTime = current;
 
-    spawnDueEvents(current);
-    advanceActive(dt, Number(STATE.sourceVideo.playbackRate || 1));
+    const isPaused = Boolean(STATE.sourceVideo.paused);
+    spawnDueEvents(current, isPaused);
+    advanceActive(dt, isPaused ? 0 : Number(STATE.sourceVideo.playbackRate || 1));
     drawFrame();
 
     STATE.rafId = requestAnimationFrame(renderLoop);
   }
 
-  function spawnDueEvents(currentTime) {
+  function spawnDueEvents(currentTime, isPaused) {
+    if (isPaused) return;
     const densityCap = clampNumber(STATE.settings.density, 20, 120, 50);
     if (STATE.active.length >= densityCap) return;
 
@@ -261,9 +360,11 @@
     const out = [];
     for (const item of STATE.active) {
       const next = item;
-      next.ttl -= dt;
-      if (item.mode === "scroll") {
-        next.x -= next.speed * dt * playbackRate;
+      if (playbackRate > 0) {
+        next.ttl -= dt;
+        if (item.mode === "scroll") {
+          next.x -= next.speed * dt * playbackRate;
+        }
       }
       const isVisible = next.mode === "scroll" ? next.x + (next.textWidth || 120) > -24 : true;
       if (next.ttl > 0 && isVisible) out.push(next);
@@ -368,28 +469,23 @@
     }, 1000);
   }
 
-  function initNativePiPHook() {
+  function initPiPButtonHijack() {
     document.addEventListener(
-      "enterpictureinpicture",
-      async (event) => {
-        if (STATE.running || STATE.nativeTakeoverInProgress) return;
-        const target = event && event.target;
-        if (!(target instanceof HTMLVideoElement)) return;
-        STATE.nativeTakeoverInProgress = true;
-        try {
-          await startPiP(target);
-        } catch (error) {
-          log(`原生PiP接管失败: ${safeError(error)}`);
-          try {
-            if (!document.pictureInPictureElement && typeof target.requestPictureInPicture === "function") {
-              await target.requestPictureInPicture();
-            }
-          } catch (_fallbackError) {
-            log("回退原生PiP失败");
-          }
-        } finally {
-          STATE.nativeTakeoverInProgress = false;
+      "click",
+      (event) => {
+        const target = event.target;
+        if (!(target instanceof Element)) return;
+        if (!matchesPiPButton(target)) return;
+        if (STATE.running) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (typeof event.stopImmediatePropagation === "function") {
+          event.stopImmediatePropagation();
         }
+        const video = findVideoElement();
+        startPiP(video, { skipExitNativePiP: true }).catch((error) => {
+          log(`点击PiP按钮接管失败: ${safeError(error)}`);
+        });
       },
       true
     );
@@ -660,5 +756,61 @@
     if (STATE.debug) {
       console.info(`[DanmakuPiP] ${text}`);
     }
+  }
+
+  function makeControlButton(doc, label) {
+    const btn = doc.createElement("button");
+    btn.textContent = label;
+    btn.style.height = "30px";
+    btn.style.minWidth = "46px";
+    btn.style.borderRadius = "7px";
+    btn.style.border = "1px solid rgba(255,255,255,0.3)";
+    btn.style.background = "rgba(22,22,22,0.68)";
+    btn.style.color = "#fff";
+    btn.style.cursor = "pointer";
+    btn.style.fontSize = "14px";
+    btn.style.fontWeight = "600";
+    return btn;
+  }
+
+  function bindVideoControlEvents() {
+    if (!STATE.sourceVideo) return;
+    const sync = () => {
+      if (!STATE.running) return;
+      if (Math.abs(Number(STATE.sourceVideo.currentTime || 0) - STATE.lastVideoTime) > 1.2) {
+        STATE.spawnedIds.clear();
+        STATE.active = [];
+      }
+    };
+    STATE.sourceVideo.addEventListener("seeked", sync);
+    STATE.controlUnsubscribers.push(() => STATE.sourceVideo.removeEventListener("seeked", sync));
+  }
+
+  function cleanupVideoControlEvents() {
+    STATE.controlUnsubscribers.forEach((fn) => {
+      try {
+        fn();
+      } catch (_error) {
+        // ignore
+      }
+    });
+    STATE.controlUnsubscribers = [];
+  }
+
+  function matchesPiPButton(target) {
+    const button = target.closest("button, [role='button'], .bpx-player-ctrl-pip, .ytp-pip-button");
+    if (!button) return false;
+    const text = [
+      button.getAttribute("aria-label"),
+      button.getAttribute("title"),
+      button.getAttribute("data-tooltip-title"),
+      button.textContent
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    const cls = (button.className && String(button.className).toLowerCase()) || "";
+    if (cls.includes("ytp-pip-button") || cls.includes("ctrl-pip")) return true;
+    return text.includes("画中画") || text.includes("picture-in-picture") || text.includes("picture in picture") || text === "pip";
   }
 })();

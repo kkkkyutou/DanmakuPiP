@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DanmakuPiP 设置</title>
+    <link rel="stylesheet" href="./options.css" />
+  </head>
+  <body>
+    <main class="container">
+      <h1>DanmakuPiP 设置</h1>
+      <section class="card">
+        <label>字号 <input id="fontSize" type="number" min="14" max="48" /></label>
+        <label>透明度 <input id="opacity" type="number" min="0.2" max="1" step="0.05" /></label>
+        <label>速度(px/s) <input id="speed" type="number" min="80" max="240" /></label>
+        <label>密度上限 <input id="density" type="number" min="20" max="120" /></label>
+        <label>屏蔽关键词（逗号分隔）
+          <textarea id="blockedKeywords" rows="4" placeholder="例如：剧透,广告"></textarea>
+        </label>
+        <label class="checkbox"><input id="debug" type="checkbox" /> 开启调试日志</label>
+      </section>
+      <div class="actions">
+        <button id="saveBtn">保存设置</button>
+        <span id="saveResult"></span>
+      </div>
+    </main>
+    <script src="./options.js"></script>
+  </body>
+</html>

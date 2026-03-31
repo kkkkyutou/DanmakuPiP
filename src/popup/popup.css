@@ -1,0 +1,61 @@
+body {
+  margin: 0;
+  font-family: "Segoe UI", "PingFang SC", sans-serif;
+  background: #101215;
+  color: #f3f5f8;
+}
+
+.app {
+  width: 280px;
+  padding: 14px;
+}
+
+h1 {
+  margin: 0 0 8px;
+  font-size: 18px;
+}
+
+.status {
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: #b9c0ca;
+}
+
+.actions {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.btn {
+  border: 1px solid #2e3440;
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+  background: #1b2028;
+  color: #f3f5f8;
+}
+
+.btn:hover {
+  background: #242b35;
+}
+
+.btn.primary {
+  background: #0069ff;
+  border-color: #0069ff;
+}
+
+.btn.primary:hover {
+  background: #0d76ff;
+}
+
+.btn.ghost {
+  width: 100%;
+}
+
+.tip {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: #8f98a7;
+}

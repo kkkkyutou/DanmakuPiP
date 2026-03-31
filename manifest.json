@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "DanmakuPiP",
+  "description": "在画中画模式中显示 B站与 YouTube 的弹幕/时间文本。",
+  "version": "1.0.0",
+  "minimum_chrome_version": "116",
+  "permissions": ["storage", "activeTab"],
+  "host_permissions": [
+    "https://*.bilibili.com/*",
+    "https://api.bilibili.com/*",
+    "https://*.youtube.com/*",
+    "https://www.youtube.com/*"
+  ],
+  "background": {
+    "service_worker": "src/background/service-worker.js"
+  },
+  "action": {
+    "default_title": "DanmakuPiP",
+    "default_popup": "src/popup/popup.html"
+  },
+  "options_page": "src/options/options.html",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.bilibili.com/video/*",
+        "https://www.youtube.com/watch*"
+      ],
+      "js": ["src/content/content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

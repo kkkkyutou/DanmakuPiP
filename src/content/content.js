@@ -467,12 +467,24 @@
       if (response?.ok) {
         return core.normalizeEvents ? core.normalizeEvents(response.events, "bilibili") : response.events;
       }
-      if (!String(response?.error || "").includes("412")) {
+      const errorText = String(response?.error || "");
+      if (!errorText.includes("412")) {
         throw new Error(response?.error || "加载 B站弹幕失败");
       }
-      const xmlText = await fetchBilibiliDanmakuXmlFromPage(cid);
-      const events = parseBilibiliDanmakuXml(xmlText);
-      return core.normalizeEvents ? core.normalizeEvents(events, "bilibili") : events;
+      try {
+        const xmlText = await fetchBilibiliDanmakuXmlFromContent(cid);
+        const events = parseBilibiliDanmakuXml(xmlText);
+        return core.normalizeEvents ? core.normalizeEvents(events, "bilibili") : events;
+      } catch (contentError) {
+        log(`内容脚本兜底失败: ${safeError(contentError)}`);
+      }
+      try {
+        const xmlText = await fetchBilibiliDanmakuXmlFromPage(cid);
+        const events = parseBilibiliDanmakuXml(xmlText);
+        return core.normalizeEvents ? core.normalizeEvents(events, "bilibili") : events;
+      } catch (pageError) {
+        throw new Error(`B站弹幕兜底失败: ${safeError(pageError)}`);
+      }
     }
 
     if (STATE.site === "youtube") {
@@ -1023,9 +1035,23 @@
       script.remove();
       setTimeout(() => {
         cleanup();
-        reject(new Error("页面上下文获取 B站弹幕超时"));
+        reject(new Error("页面上下文获取 B站弹幕超时（可能被站点策略拦截）"));
       }, 8000);
     });
+  }
+
+  async function fetchBilibiliDanmakuXmlFromContent(cid) {
+    const url = `https://api.bilibili.com/x/v1/dm/list.so?oid=${encodeURIComponent(String(cid))}`;
+    const res = await fetch(url, {
+      credentials: "include",
+      headers: {
+        Accept: "application/xml,text/xml;q=0.9,*/*;q=0.8"
+      }
+    });
+    if (!res.ok) {
+      throw new Error(`内容脚本获取 B站弹幕失败: ${res.status}`);
+    }
+    return res.text();
   }
 
   function parseBilibiliDanmakuXml(xmlText) {

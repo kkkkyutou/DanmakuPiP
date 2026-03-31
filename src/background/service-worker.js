@@ -35,30 +35,7 @@ async function fetchBilibiliDanmaku(cid) {
     throw new Error(`获取 B站弹幕失败: ${response.status}`);
   }
   const xmlText = await response.text();
-  const doc = new DOMParser().parseFromString(xmlText, "text/xml");
-  const dNodes = Array.from(doc.querySelectorAll("d"));
-  const events = dNodes
-    .map((node, index) => {
-      const p = node.getAttribute("p");
-      if (!p) return null;
-      const parts = p.split(",");
-      const t = Number(parts[0]);
-      const modeNum = Number(parts[1]);
-      const color = `#${Number(parts[3] || 16777215).toString(16).padStart(6, "0")}`;
-      const text = (node.textContent || "").trim();
-      if (!text || Number.isNaN(t)) return null;
-      return {
-        id: `bili-${index}`,
-        source: "bilibili",
-        t,
-        mode: modeNum === 5 ? "top" : modeNum === 4 ? "bottom" : "scroll",
-        color,
-        text
-      };
-    })
-    .filter(Boolean);
-
-  return events;
+  return parseBilibiliDanmakuXml(xmlText);
 }
 
 async function fetchYoutubeCaptions(baseUrl) {
@@ -71,24 +48,7 @@ async function fetchYoutubeCaptions(baseUrl) {
     throw new Error(`获取 YouTube 时间文本失败: ${response.status}`);
   }
   const xmlText = await response.text();
-  const doc = new DOMParser().parseFromString(xmlText, "text/xml");
-  const textNodes = Array.from(doc.querySelectorAll("text"));
-  const events = textNodes
-    .map((node, index) => {
-      const start = Number(node.getAttribute("start"));
-      const text = decodeHtmlEntities((node.textContent || "").replace(/\s+/g, " ").trim());
-      if (!text || Number.isNaN(start)) return null;
-      return {
-        id: `yt-${index}`,
-        source: "youtube",
-        t: start,
-        mode: "bottom",
-        color: "#FFFFFF",
-        text
-      };
-    })
-    .filter(Boolean);
-  return events;
+  return parseYoutubeCaptionsXml(xmlText);
 }
 
 function decodeHtmlEntities(text) {
@@ -97,5 +57,59 @@ function decodeHtmlEntities(text) {
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&#39;/g, "'")
-    .replace(/&quot;/g, '"');
+    .replace(/&quot;/g, '"')
+    .replace(/&#(\d+);/g, (_m, code) => String.fromCharCode(Number(code)))
+    .replace(/&#x([0-9a-fA-F]+);/g, (_m, code) => String.fromCharCode(parseInt(code, 16)));
+}
+
+function parseBilibiliDanmakuXml(xmlText) {
+  const pattern = /<d\s+[^>]*p="([^"]+)"[^>]*>([\s\S]*?)<\/d>/g;
+  const events = [];
+  let match;
+  let index = 0;
+  while ((match = pattern.exec(xmlText)) !== null) {
+    const p = match[1];
+    const rawText = match[2] || "";
+    const parts = p.split(",");
+    const t = Number(parts[0]);
+    const modeNum = Number(parts[1]);
+    const colorNum = Number(parts[3] || 16777215);
+    const text = decodeHtmlEntities(rawText).replace(/\s+/g, " ").trim();
+    if (!text || Number.isNaN(t)) continue;
+    events.push({
+      id: `bili-${index}`,
+      source: "bilibili",
+      t,
+      mode: modeNum === 5 ? "top" : modeNum === 4 ? "bottom" : "scroll",
+      color: `#${colorNum.toString(16).padStart(6, "0")}`,
+      text
+    });
+    index += 1;
+  }
+  return events;
+}
+
+function parseYoutubeCaptionsXml(xmlText) {
+  const pattern = /<text\b([^>]*)>([\s\S]*?)<\/text>/g;
+  const events = [];
+  let match;
+  let index = 0;
+  while ((match = pattern.exec(xmlText)) !== null) {
+    const attrs = match[1] || "";
+    const rawText = match[2] || "";
+    const startMatch = attrs.match(/\bstart="([^"]+)"/);
+    const start = Number(startMatch ? startMatch[1] : NaN);
+    const text = decodeHtmlEntities(rawText).replace(/\s+/g, " ").trim();
+    if (!text || Number.isNaN(start)) continue;
+    events.push({
+      id: `yt-${index}`,
+      source: "youtube",
+      t: start,
+      mode: "bottom",
+      color: "#FFFFFF",
+      text
+    });
+    index += 1;
+  }
+  return events;
 }

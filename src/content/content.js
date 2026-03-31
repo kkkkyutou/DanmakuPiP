@@ -572,9 +572,7 @@
     document.addEventListener(
       "click",
       (event) => {
-        const target = event.target;
-        if (!(target instanceof Element)) return;
-        if (!matchesPiPButton(target)) return;
+        if (!matchesPiPButtonFromEvent(event)) return;
         if (STATE.running) return;
         event.preventDefault();
         event.stopPropagation();
@@ -640,11 +638,13 @@
 
   function initPageRequestPiPHook() {
     const eventName = "DanmakuPiP:NativeRequestPiP";
+    const resultName = "DanmakuPiP:NativeRequestPiP:Result";
     window.addEventListener(
       eventName,
       (event) => {
         if (STATE.running || STATE.nativeTakeoverInProgress) return;
         const detail = event.detail || {};
+        const requestId = detail.requestId ? String(detail.requestId) : "";
         const id = detail.id ? String(detail.id) : "";
         let video = null;
         if (id) {
@@ -653,12 +653,19 @@
         if (!(video instanceof HTMLVideoElement)) {
           video = findVideoElement();
         }
-        if (!(video instanceof HTMLVideoElement)) return;
-        event.preventDefault();
+        if (!(video instanceof HTMLVideoElement)) {
+          dispatchNativePiPResult(resultName, requestId, false, "video-not-found");
+          return;
+        }
+        event.preventDefault(); // will fallback to native in injected script if not successful
         STATE.nativeTakeoverInProgress = true;
         startPiP(video, { skipExitNativePiP: true })
+          .then(() => {
+            dispatchNativePiPResult(resultName, requestId, true, "");
+          })
           .catch((error) => {
             log(`页面requestPiP接管失败: ${safeError(error)}`);
+            dispatchNativePiPResult(resultName, requestId, false, safeError(error));
           })
           .finally(() => {
             STATE.nativeTakeoverInProgress = false;
@@ -684,14 +691,39 @@
             id = "dmp_" + Date.now() + "_" + (++seq);
             this.setAttribute("data-dmp-hook-id", id);
           }
+          const requestId = id + "_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
           const evt = new CustomEvent(eventName, {
             bubbles: true,
             cancelable: true,
-            detail: { id: id }
+            detail: { id: id, requestId: requestId }
           });
           window.dispatchEvent(evt);
           if (evt.defaultPrevented) {
-            return Promise.resolve(null);
+            return new Promise((resolve, reject) => {
+              let done = false;
+              const cleanup = () => {
+                window.removeEventListener(${JSON.stringify(resultName)}, onResult, true);
+              };
+              const onResult = (e) => {
+                const d = e && e.detail ? e.detail : {};
+                if (d.requestId !== requestId) return;
+                if (done) return;
+                done = true;
+                cleanup();
+                if (d.ok) {
+                  resolve(null);
+                } else {
+                  original.call(this).then(resolve).catch(reject);
+                }
+              };
+              window.addEventListener(${JSON.stringify(resultName)}, onResult, true);
+              setTimeout(() => {
+                if (done) return;
+                done = true;
+                cleanup();
+                original.call(this).then(resolve).catch(reject);
+              }, 650);
+            });
           }
           return original.call(this);
         };
@@ -1307,5 +1339,28 @@
     const cls = (button.className && String(button.className).toLowerCase()) || "";
     if (cls.includes("ytp-pip-button") || cls.includes("ctrl-pip")) return true;
     return text.includes("画中画") || text.includes("picture-in-picture") || text.includes("picture in picture") || text === "pip";
+  }
+
+  function matchesPiPButtonFromEvent(event) {
+    const path = typeof event.composedPath === "function" ? event.composedPath() : [];
+    for (const node of path) {
+      if (node instanceof Element && matchesPiPButton(node)) {
+        return true;
+      }
+    }
+    const target = event.target;
+    return target instanceof Element ? matchesPiPButton(target) : false;
+  }
+
+  function dispatchNativePiPResult(eventName, requestId, ok, error) {
+    try {
+      window.dispatchEvent(
+        new CustomEvent(eventName, {
+          detail: { requestId, ok, error: error || "" }
+        })
+      );
+    } catch (_error) {
+      // ignore
+    }
   }
 })();

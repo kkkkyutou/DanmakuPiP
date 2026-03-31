@@ -1120,7 +1120,8 @@
   async function fetchBilibiliDanmakuXmlFromPage(cid) {
     const requestId = `dmp_${Date.now()}_${Math.random().toString(36).slice(2)}`;
     const eventName = `DanmakuPiP:DMXML:${requestId}`;
-    const url = `https://api.bilibili.com/x/v1/dm/list.so?oid=${encodeURIComponent(String(cid))}`;
+    const legacyUrl = `https://comment.bilibili.com/${encodeURIComponent(String(cid))}.xml`;
+    const apiUrl = `https://api.bilibili.com/x/v1/dm/list.so?oid=${encodeURIComponent(String(cid))}`;
     return new Promise((resolve, reject) => {
       const cleanup = () => {
         window.removeEventListener(eventName, onResult);
@@ -1139,8 +1140,12 @@
       script.textContent = `
         (async function () {
           try {
-            const res = await fetch(${JSON.stringify(url)}, { credentials: "include" });
-            const text = await res.text();
+            let res = await fetch(${JSON.stringify(legacyUrl)}, { credentials: "include" });
+            let text = await res.text();
+            if (!res.ok) {
+              res = await fetch(${JSON.stringify(apiUrl)}, { credentials: "include" });
+              text = await res.text();
+            }
             window.dispatchEvent(new CustomEvent(${JSON.stringify(eventName)}, {
               detail: { ok: res.ok, status: res.status, text: text }
             }));
@@ -1161,6 +1166,15 @@
   }
 
   async function fetchBilibiliDanmakuXmlFromContent(cid) {
+    const legacyUrl = `https://comment.bilibili.com/${encodeURIComponent(String(cid))}.xml`;
+    const legacyRes = await fetch(legacyUrl, {
+      credentials: "include",
+      headers: {
+        Accept: "application/xml,text/xml;q=0.9,*/*;q=0.8"
+      }
+    });
+    if (legacyRes.ok) return legacyRes.text();
+
     const url = `https://api.bilibili.com/x/v1/dm/list.so?oid=${encodeURIComponent(String(cid))}`;
     const res = await fetch(url, {
       credentials: "include",
@@ -1169,7 +1183,7 @@
       }
     });
     if (!res.ok) {
-      throw new Error(`内容脚本获取 B站弹幕失败: ${res.status}`);
+      throw new Error(`内容脚本获取 B站弹幕失败: legacy=${legacyRes.status}, api=${res.status}`);
     }
     return res.text();
   }

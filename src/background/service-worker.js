@@ -1,4 +1,5 @@
 const BILIBILI_DANMAKU_URL = "https://api.bilibili.com/x/v1/dm/list.so?oid=";
+const BILIBILI_LEGACY_DANMAKU_URL = "https://comment.bilibili.com/";
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message || typeof message !== "object") {
@@ -30,12 +31,17 @@ async function fetchBilibiliDanmaku(cid) {
   if (!cid) {
     throw new Error("缺少 B站 cid");
   }
+  const legacyUrl = `${BILIBILI_LEGACY_DANMAKU_URL}${encodeURIComponent(String(cid))}.xml`;
+  const legacyResp = await fetch(legacyUrl);
+  if (legacyResp.ok) {
+    return parseBilibiliDanmakuXml(await legacyResp.text());
+  }
+
   const response = await fetch(`${BILIBILI_DANMAKU_URL}${encodeURIComponent(String(cid))}`);
   if (!response.ok) {
-    throw new Error(`获取 B站弹幕失败: ${response.status}`);
+    throw new Error(`获取 B站弹幕失败: legacy=${legacyResp.status}, api=${response.status}`);
   }
-  const xmlText = await response.text();
-  return parseBilibiliDanmakuXml(xmlText);
+  return parseBilibiliDanmakuXml(await response.text());
 }
 
 async function fetchYoutubeCaptions(baseUrl) {

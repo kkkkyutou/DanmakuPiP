@@ -4,6 +4,8 @@ const ids = {
   speed: document.getElementById("speed"),
   density: document.getElementById("density"),
   maxFps: document.getElementById("maxFps"),
+  displayAreaRatio: document.getElementById("displayAreaRatio"),
+  syncWithBili: document.getElementById("syncWithBili"),
   blockedKeywords: document.getElementById("blockedKeywords"),
   debug: document.getElementById("debug"),
   saveBtn: document.getElementById("saveBtn"),
@@ -11,11 +13,13 @@ const ids = {
 };
 
 const DEFAULTS = {
-  fontSize: 24,
+  fontSize: 20,
   opacity: 0.9,
   speed: 140,
   density: 50,
   maxFps: 45,
+  displayAreaRatio: 1,
+  syncWithBili: true,
   blockedKeywords: [],
   debug: false
 };
@@ -30,6 +34,8 @@ async function init() {
   ids.speed.value = data.speed;
   ids.density.value = data.density;
   ids.maxFps.value = data.maxFps;
+  ids.displayAreaRatio.value = data.displayAreaRatio;
+  ids.syncWithBili.checked = Boolean(data.syncWithBili);
   ids.blockedKeywords.value = (data.blockedKeywords || []).join(", ");
   ids.debug.checked = Boolean(data.debug);
 }
@@ -46,6 +52,8 @@ async function save() {
     speed: toNum(ids.speed.value, 140),
     density: toNum(ids.density.value, 50),
     maxFps: toNum(ids.maxFps.value, 45),
+    displayAreaRatio: toNum(ids.displayAreaRatio.value, 1),
+    syncWithBili: ids.syncWithBili.checked,
     blockedKeywords: keywords,
     debug: ids.debug.checked
   };

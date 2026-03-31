@@ -13,11 +13,13 @@
     urlWatcherId: null,
     currentUrl: location.href,
     settings: {
-      fontSize: 24,
+      fontSize: 20,
       opacity: 0.9,
       speed: 140,
       density: 50,
       maxFps: 45,
+      displayAreaRatio: 1,
+      syncWithBili: true,
       blockedKeywords: []
     },
     events: [],
@@ -29,6 +31,7 @@
     hiddenSourceVideo: null,
     hiddenSourceOriginalStyle: "",
     laneCount: 0,
+    nativeTakeoverInProgress: false,
     debug: false
   };
 
@@ -61,7 +64,7 @@
   initUrlWatcher();
   initNativePiPHook();
 
-  async function startPiP(forcedVideo = null) {
+  async function startPiP(forcedVideo = null, options = {}) {
     if (STATE.running) return;
     ensureSupported();
     STATE.site = detectSite();
@@ -70,6 +73,9 @@
 
     STATE.sourceVideo = video;
     STATE.settings = await loadSettings();
+    if (STATE.site === "bilibili" && STATE.settings.syncWithBili) {
+      STATE.settings = applyBiliDanmakuSettings(STATE.settings);
+    }
     STATE.events = await loadDanmakuEvents();
     STATE.spawnedIds.clear();
     STATE.active = [];
@@ -78,6 +84,14 @@
 
     if (!STATE.events.length) {
       throw new Error("未获取到可显示内容（B站弹幕或 YouTube 时间文本）");
+    }
+
+    if (!options.skipExitNativePiP && document.pictureInPictureElement) {
+      try {
+        await document.exitPictureInPicture();
+      } catch (_error) {
+        log("退出原生PiP失败，继续尝试弹幕PiP");
+      }
     }
 
     const pipWindow = await documentPictureInPicture.requestWindow({
@@ -216,15 +230,16 @@
     const speed = clampNumber(STATE.settings.speed, 80, 240, 140);
     const textWidth = measureTextWidth(event.text, fontSize);
     const trackHeight = Math.max(28, fontSize + 8);
-    const trackCount = Math.max(4, STATE.laneCount || Math.floor(canvas.height / trackHeight));
+    const renderHeight = getRenderHeight(canvas.height);
+    const trackCount = Math.max(4, Math.floor(renderHeight / trackHeight));
     const lane = chooseLane(trackCount, canvas.width);
-    const y = Math.min(canvas.height - 8, lane * trackHeight + fontSize + 2);
+    const y = Math.min(renderHeight - 6, lane * trackHeight + fontSize + 2);
 
     if (event.mode === "top" || event.mode === "bottom") {
       return {
         ...event,
         x: Math.max(8, (canvas.width - textWidth) / 2),
-        y: event.mode === "top" ? fontSize + 6 : canvas.height - 10,
+        y: event.mode === "top" ? fontSize + 6 : Math.max(fontSize + 10, renderHeight - 10),
         ttl: 2.4,
         speed: 0,
         textWidth,
@@ -259,17 +274,17 @@
   function drawFrame() {
     const canvas = STATE.danmakuCanvas;
     const ctx = STATE.danmakuCtx;
-    const fontSize = clampNumber(STATE.settings.fontSize, 14, 48, 24);
+    const fontSize = clampNumber(STATE.settings.fontSize, 14, 42, 20);
     const opacity = clampNumber(STATE.settings.opacity, 0.2, 1, 0.9);
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.font = `600 ${fontSize}px "Microsoft YaHei","PingFang SC","Helvetica Neue",Arial,sans-serif`;
     ctx.textBaseline = "alphabetic";
     ctx.globalAlpha = opacity;
-    ctx.lineWidth = Math.max(2, Math.floor(fontSize / 8));
-    ctx.strokeStyle = "rgba(0,0,0,0.75)";
-    ctx.shadowColor = "rgba(0,0,0,0.45)";
-    ctx.shadowBlur = Math.max(2, Math.floor(fontSize / 6));
+    ctx.lineWidth = Math.max(1.5, Math.floor(fontSize / 10));
+    ctx.strokeStyle = "rgba(0,0,0,0.62)";
+    ctx.shadowColor = "rgba(0,0,0,0.3)";
+    ctx.shadowBlur = Math.max(1, Math.floor(fontSize / 10));
 
     for (const item of STATE.active) {
       ctx.fillStyle = item.color || "#FFFFFF";
@@ -357,19 +372,24 @@
     document.addEventListener(
       "enterpictureinpicture",
       async (event) => {
-        if (STATE.running) return;
+        if (STATE.running || STATE.nativeTakeoverInProgress) return;
         const target = event && event.target;
         if (!(target instanceof HTMLVideoElement)) return;
+        STATE.nativeTakeoverInProgress = true;
         try {
-          if (document.pictureInPictureElement) {
-            await document.exitPictureInPicture();
-          }
-        } catch (_error) {
-          log("退出原生PiP失败，将继续尝试DocPiP");
-        }
-        startPiP(target).catch((error) => {
+          await startPiP(target);
+        } catch (error) {
           log(`原生PiP接管失败: ${safeError(error)}`);
-        });
+          try {
+            if (!document.pictureInPictureElement && typeof target.requestPictureInPicture === "function") {
+              await target.requestPictureInPicture();
+            }
+          } catch (_fallbackError) {
+            log("回退原生PiP失败");
+          }
+        } finally {
+          STATE.nativeTakeoverInProgress = false;
+        }
       },
       true
     );
@@ -377,22 +397,26 @@
 
   async function loadSettings() {
     const defaults = {
-      fontSize: 24,
+      fontSize: 20,
       opacity: 0.9,
       speed: 140,
       density: 50,
       maxFps: 45,
+      displayAreaRatio: 1,
+      syncWithBili: true,
       blockedKeywords: [],
       debug: false
     };
     const value = await chrome.storage.local.get(defaults);
     STATE.debug = Boolean(value.debug);
     return {
-      fontSize: clampNumber(value.fontSize, 14, 48, defaults.fontSize),
+      fontSize: clampNumber(value.fontSize, 14, 42, defaults.fontSize),
       opacity: clampNumber(value.opacity, 0.2, 1, defaults.opacity),
       speed: clampNumber(value.speed, 80, 240, defaults.speed),
       density: clampNumber(value.density, 20, 120, defaults.density),
       maxFps: clampNumber(value.maxFps, 15, 60, defaults.maxFps),
+      displayAreaRatio: clampNumber(value.displayAreaRatio, 0.25, 1, defaults.displayAreaRatio),
+      syncWithBili: Boolean(value.syncWithBili),
       blockedKeywords: core.parseKeywordList
         ? core.parseKeywordList(value.blockedKeywords)
         : Array.isArray(value.blockedKeywords)
@@ -410,6 +434,8 @@
         changes.speed ||
         changes.density ||
         changes.maxFps ||
+        changes.displayAreaRatio ||
+        changes.syncWithBili ||
         changes.blockedKeywords ||
         changes.debug
       ) {
@@ -485,6 +511,110 @@
       }
     }
     return bestLane;
+  }
+
+  function getRenderHeight(canvasHeight) {
+    const ratio = clampNumber(STATE.settings.displayAreaRatio, 0.25, 1, 1);
+    return Math.max(80, Math.floor(canvasHeight * ratio));
+  }
+
+  function applyBiliDanmakuSettings(base) {
+    const merged = { ...base };
+    const candidates = [
+      "bilibili_player_settings",
+      "bili_player_settings",
+      "biliplayer_settings",
+      "bpx_player_profile",
+      "bilibili_player"
+    ];
+    const objects = [];
+    for (const key of candidates) {
+      const raw = safeReadLocalStorage(key);
+      if (!raw) continue;
+      try {
+        objects.push(JSON.parse(raw));
+      } catch (_error) {
+        // ignore
+      }
+    }
+    const found = {
+      opacity: findNumberByKeys(objects, ["opacity", "danmakuOpacity", "dmOpacity", "danmuOpacity"]),
+      fontSize: findNumberByKeys(objects, ["fontSize", "fontsize", "dmFontSize", "danmakuFontSize"]),
+      speed: findNumberByKeys(objects, ["speed", "danmakuSpeed", "dmSpeed", "danmuSpeed"]),
+      area: findNumberByKeys(objects, ["area", "danmakuArea", "dmArea", "showArea", "danmuArea"])
+    };
+
+    if (Number.isFinite(found.opacity)) {
+      merged.opacity = normalizeOpacity(found.opacity, merged.opacity);
+    }
+    if (Number.isFinite(found.fontSize)) {
+      merged.fontSize = normalizeFontSize(found.fontSize, merged.fontSize);
+    }
+    if (Number.isFinite(found.speed)) {
+      merged.speed = normalizeSpeed(found.speed, merged.speed);
+    }
+    if (Number.isFinite(found.area)) {
+      merged.displayAreaRatio = normalizeArea(found.area, merged.displayAreaRatio);
+    }
+    return merged;
+  }
+
+  function safeReadLocalStorage(key) {
+    try {
+      return window.localStorage.getItem(key);
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function findNumberByKeys(objects, keys) {
+    for (const obj of objects) {
+      const value = findValueRecursive(obj, keys, 0);
+      if (Number.isFinite(value)) return value;
+    }
+    return NaN;
+  }
+
+  function findValueRecursive(node, keys, depth) {
+    if (depth > 7 || !node || typeof node !== "object") return NaN;
+    for (const key of keys) {
+      if (Object.prototype.hasOwnProperty.call(node, key)) {
+        const num = Number(node[key]);
+        if (Number.isFinite(num)) return num;
+      }
+    }
+    for (const v of Object.values(node)) {
+      const num = findValueRecursive(v, keys, depth + 1);
+      if (Number.isFinite(num)) return num;
+    }
+    return NaN;
+  }
+
+  function normalizeOpacity(v, fallback) {
+    if (!Number.isFinite(v)) return fallback;
+    if (v > 1 && v <= 100) return clampNumber(v / 100, 0.2, 1, fallback);
+    return clampNumber(v, 0.2, 1, fallback);
+  }
+
+  function normalizeFontSize(v, fallback) {
+    if (!Number.isFinite(v)) return fallback;
+    if (v > 0 && v <= 3) return clampNumber(20 * v, 14, 42, fallback);
+    if (v > 3 && v <= 100) return clampNumber(v, 14, 42, fallback);
+    return fallback;
+  }
+
+  function normalizeSpeed(v, fallback) {
+    if (!Number.isFinite(v)) return fallback;
+    if (v > 0 && v <= 3) return clampNumber(140 * v, 80, 240, fallback);
+    if (v >= 0 && v <= 100) return clampNumber(80 + v * 1.6, 80, 240, fallback);
+    return clampNumber(v, 80, 240, fallback);
+  }
+
+  function normalizeArea(v, fallback) {
+    if (!Number.isFinite(v)) return fallback;
+    if (v > 0 && v <= 1) return clampNumber(v, 0.25, 1, fallback);
+    if (v > 1 && v <= 100) return clampNumber(v / 100, 0.25, 1, fallback);
+    return fallback;
   }
 
   function hideSourceVideo(video) {

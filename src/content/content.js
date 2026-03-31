@@ -172,13 +172,13 @@
     controls.style.left = "8px";
     controls.style.right = "8px";
     controls.style.bottom = "8px";
-    controls.style.height = "36px";
-    controls.style.display = "flex";
-    controls.style.alignItems = "center";
-    controls.style.gap = "8px";
-    controls.style.padding = "0 10px";
+    controls.style.height = "68px";
+    controls.style.display = "grid";
+    controls.style.gridTemplateRows = "30px 30px";
+    controls.style.gap = "6px";
+    controls.style.padding = "6px 10px";
     controls.style.borderRadius = "9px";
-    controls.style.background = "rgba(16,16,16,0.68)";
+    controls.style.background = "rgba(16,16,16,0.42)";
     controls.style.opacity = "0";
     controls.style.transition = "opacity 120ms ease";
     controls.style.pointerEvents = "none";
@@ -193,8 +193,9 @@
     progress.step = "1";
     progress.value = "0";
     progress.style.flex = "1";
-    progress.style.height = "20px";
+    progress.style.height = "18px";
     progress.style.margin = "0";
+    progress.style.accentColor = "#8fd3ff";
 
     const timeLabel = doc.createElement("span");
     timeLabel.textContent = "00:00 / 00:00";
@@ -203,10 +204,30 @@
     timeLabel.style.minWidth = "96px";
     timeLabel.style.textAlign = "right";
 
+    const topRow = doc.createElement("div");
+    topRow.style.display = "flex";
+    topRow.style.alignItems = "center";
+    topRow.style.gap = "8px";
+
+    const playPauseBtn = doc.createElement("button");
+    playPauseBtn.textContent = sourceVideo.paused ? "播放" : "暂停";
+    playPauseBtn.style.height = "28px";
+    playPauseBtn.style.width = "76px";
+    playPauseBtn.style.justifySelf = "center";
+    playPauseBtn.style.borderRadius = "8px";
+    playPauseBtn.style.border = "1px solid rgba(255,255,255,0.42)";
+    playPauseBtn.style.background = "rgba(255,255,255,0.15)";
+    playPauseBtn.style.color = "#fff";
+    playPauseBtn.style.cursor = "pointer";
+    playPauseBtn.style.fontWeight = "600";
+    playPauseBtn.style.fontSize = "13px";
+
     container.appendChild(pipVideo);
     container.appendChild(canvas);
-    controls.appendChild(progress);
-    controls.appendChild(timeLabel);
+    topRow.appendChild(progress);
+    topRow.appendChild(timeLabel);
+    controls.appendChild(topRow);
+    controls.appendChild(playPauseBtn);
     container.appendChild(controls);
     doc.body.appendChild(container);
 
@@ -249,20 +270,11 @@
       } else {
         sourceVideo.pause();
       }
+      playPauseBtn.textContent = sourceVideo.paused ? "播放" : "暂停";
     };
 
-    const onContainerClick = (event) => {
-      if (!(event.target instanceof Element)) return;
-      if (event.target === progress) return;
-      togglePlayPause();
-      showControls();
-    };
-    const onDocumentClick = (event) => {
-      if (!(event.target instanceof Element)) return;
-      if (event.target === progress) return;
-      if (controls.contains(event.target) && event.target !== pipVideo) return;
-      togglePlayPause();
-      showControls();
+    const syncPlayPauseText = () => {
+      playPauseBtn.textContent = sourceVideo.paused ? "播放" : "暂停";
     };
     const onProgressDown = (event) => {
       event.stopPropagation();
@@ -282,29 +294,34 @@
     };
     const onMouseMove = () => showControls();
     const onMouseLeave = () => hideControls();
+    const onPlayPauseClick = (event) => {
+      event.stopPropagation();
+      togglePlayPause();
+      showControls();
+    };
 
-    container.addEventListener("click", onContainerClick, true);
-    pipVideo.addEventListener("click", onContainerClick, true);
-    doc.addEventListener("click", onDocumentClick, true);
     container.addEventListener("mousemove", onMouseMove, { passive: true });
     container.addEventListener("mouseleave", onMouseLeave, { passive: true });
     progress.addEventListener("pointerdown", onProgressDown, true);
     progress.addEventListener("input", onProgressInput, true);
     progress.addEventListener("pointerup", onProgressUp, true);
     progress.addEventListener("change", onProgressUp, true);
+    playPauseBtn.addEventListener("click", onPlayPauseClick, true);
+    sourceVideo.addEventListener("play", syncPlayPauseText);
+    sourceVideo.addEventListener("pause", syncPlayPauseText);
     sourceVideo.addEventListener("timeupdate", updateProgress);
     sourceVideo.addEventListener("durationchange", updateProgress);
     sourceVideo.addEventListener("loadedmetadata", updateProgress);
 
-    STATE.controlUnsubscribers.push(() => container.removeEventListener("click", onContainerClick, true));
-    STATE.controlUnsubscribers.push(() => pipVideo.removeEventListener("click", onContainerClick, true));
-    STATE.controlUnsubscribers.push(() => doc.removeEventListener("click", onDocumentClick, true));
     STATE.controlUnsubscribers.push(() => container.removeEventListener("mousemove", onMouseMove));
     STATE.controlUnsubscribers.push(() => container.removeEventListener("mouseleave", onMouseLeave));
     STATE.controlUnsubscribers.push(() => progress.removeEventListener("pointerdown", onProgressDown, true));
     STATE.controlUnsubscribers.push(() => progress.removeEventListener("input", onProgressInput, true));
     STATE.controlUnsubscribers.push(() => progress.removeEventListener("pointerup", onProgressUp, true));
     STATE.controlUnsubscribers.push(() => progress.removeEventListener("change", onProgressUp, true));
+    STATE.controlUnsubscribers.push(() => playPauseBtn.removeEventListener("click", onPlayPauseClick, true));
+    STATE.controlUnsubscribers.push(() => sourceVideo.removeEventListener("play", syncPlayPauseText));
+    STATE.controlUnsubscribers.push(() => sourceVideo.removeEventListener("pause", syncPlayPauseText));
     STATE.controlUnsubscribers.push(() => sourceVideo.removeEventListener("timeupdate", updateProgress));
     STATE.controlUnsubscribers.push(() => sourceVideo.removeEventListener("durationchange", updateProgress));
     STATE.controlUnsubscribers.push(() => sourceVideo.removeEventListener("loadedmetadata", updateProgress));

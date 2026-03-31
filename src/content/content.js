@@ -40,6 +40,10 @@
     controlsHideTimer: null,
     observedVideos: new WeakSet(),
     videoObserver: null,
+    forceBiliLiveDom: false,
+    liveDomMode: false,
+    liveDomObserver: null,
+    liveDomDedup: new Map(),
     debug: false
   };
 
@@ -86,13 +90,21 @@
     if (STATE.site === "bilibili" && STATE.settings.syncWithBili) {
       STATE.settings = applyBiliDanmakuSettings(STATE.settings);
     }
+    STATE.forceBiliLiveDom = false;
+    STATE.liveDomMode = false;
     STATE.events = await loadDanmakuEvents();
     STATE.spawnedIds.clear();
     STATE.active = [];
     STATE.trackCursor = 0;
     STATE.lastVideoTime = Number(video.currentTime || 0);
 
-    if (!STATE.events.length) {
+    if (STATE.forceBiliLiveDom && STATE.site === "bilibili") {
+      initBiliLiveDomBridge();
+      STATE.liveDomMode = true;
+      log("启用 B站 DOM 实时弹幕兜底模式");
+    }
+
+    if (!STATE.events.length && !STATE.liveDomMode) {
       throw new Error("未获取到可显示内容（B站弹幕或 YouTube 时间文本）");
     }
 
@@ -133,6 +145,7 @@
     STATE.pipVideo = null;
     STATE.danmakuCanvas = null;
     STATE.danmakuCtx = null;
+    cleanupLiveDomBridge();
     cleanupVideoControlEvents();
     restoreSourceVideo();
   }
@@ -364,6 +377,7 @@
   }
 
   function spawnDueEvents(currentTime, isPaused) {
+    if (STATE.liveDomMode) return;
     if (isPaused) return;
     const densityCap = clampNumber(STATE.settings.density, 20, 120, 50);
     if (STATE.active.length >= densityCap) return;
@@ -483,7 +497,9 @@
         const events = parseBilibiliDanmakuXml(xmlText);
         return core.normalizeEvents ? core.normalizeEvents(events, "bilibili") : events;
       } catch (pageError) {
-        throw new Error(`B站弹幕兜底失败: ${safeError(pageError)}`);
+        STATE.forceBiliLiveDom = true;
+        log(`B站弹幕接口全失败，将切 DOM 实时模式: ${safeError(pageError)}`);
+        return [];
       }
     }
 
@@ -619,6 +635,110 @@
       subtree: true,
       childList: true
     });
+  }
+
+  function initBiliLiveDomBridge() {
+    cleanupLiveDomBridge();
+    const root = findBiliDanmakuRoot() || document.body;
+    if (!root) return;
+    STATE.liveDomDedup.clear();
+    STATE.liveDomObserver = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        for (const node of mutation.addedNodes) {
+          if (!(node instanceof HTMLElement)) continue;
+          collectDanmakuFromNode(node);
+        }
+      }
+    });
+    STATE.liveDomObserver.observe(root, { subtree: true, childList: true });
+  }
+
+  function cleanupLiveDomBridge() {
+    if (STATE.liveDomObserver) {
+      try {
+        STATE.liveDomObserver.disconnect();
+      } catch (_error) {
+        // ignore
+      }
+      STATE.liveDomObserver = null;
+    }
+    STATE.liveDomDedup.clear();
+    STATE.liveDomMode = false;
+  }
+
+  function findBiliDanmakuRoot() {
+    const candidates = [
+      ".bpx-player-dm-wrap",
+      ".bilibili-player-video-danmaku",
+      ".bpx-player-row-dm-wrap",
+      ".bilibili-player-danmaku",
+      "[class*='dm-wrap']"
+    ];
+    for (const selector of candidates) {
+      const el = document.querySelector(selector);
+      if (el) return el;
+    }
+    return null;
+  }
+
+  function collectDanmakuFromNode(node) {
+    if (!node || !STATE.running || !STATE.sourceVideo) return;
+    if (isLikelyDanmakuNode(node)) {
+      pushLiveDomDanmaku(node);
+    }
+    const descendants = node.querySelectorAll
+      ? node.querySelectorAll(".bili-dm,[class*='dm'],[class*='danmaku']")
+      : [];
+    descendants.forEach((el) => {
+      if (el instanceof HTMLElement && isLikelyDanmakuNode(el)) {
+        pushLiveDomDanmaku(el);
+      }
+    });
+  }
+
+  function isLikelyDanmakuNode(el) {
+    const text = (el.textContent || "").trim();
+    if (!text || text.length > 80) return false;
+    const cls = (el.className && String(el.className).toLowerCase()) || "";
+    if (cls.includes("dm") || cls.includes("danmaku")) return true;
+    const style = window.getComputedStyle(el);
+    return style.position === "absolute" && style.pointerEvents === "none";
+  }
+
+  function pushLiveDomDanmaku(el) {
+    const text = (el.textContent || "").replace(/\s+/g, " ").trim();
+    if (!text) return;
+    const now = Date.now();
+    const key = text;
+    const prev = STATE.liveDomDedup.get(key) || 0;
+    if (now - prev < 700) return;
+    STATE.liveDomDedup.set(key, now);
+    if (STATE.liveDomDedup.size > 300) {
+      for (const [k, t] of STATE.liveDomDedup) {
+        if (now - t > 30000) STATE.liveDomDedup.delete(k);
+      }
+    }
+    const color = rgbaToHex(window.getComputedStyle(el).color) || "#FFFFFF";
+    const event = {
+      id: `live-${now}-${Math.random().toString(36).slice(2, 8)}`,
+      source: "bilibili",
+      mode: "scroll",
+      color,
+      text
+    };
+    const densityCap = clampNumber(STATE.settings.density, 20, 120, 50);
+    if (STATE.active.length >= densityCap) return;
+    STATE.active.push(createActiveDanmaku(event));
+  }
+
+  function rgbaToHex(color) {
+    if (!color) return null;
+    const m = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/i);
+    if (!m) return null;
+    const r = Number(m[1]).toString(16).padStart(2, "0");
+    const g = Number(m[2]).toString(16).padStart(2, "0");
+    const b = Number(m[3]).toString(16).padStart(2, "0");
+    return `#${r}${g}${b}`.toUpperCase();
   }
 
   async function loadSettings() {

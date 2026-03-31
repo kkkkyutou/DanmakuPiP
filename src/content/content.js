@@ -243,14 +243,25 @@
       if (!STATE.progressDragging) setProgressVisible(false);
     };
 
-    const onContainerClick = (event) => {
-      if (!(event.target instanceof Element)) return;
-      if (event.target === progress) return;
+    const togglePlayPause = () => {
       if (sourceVideo.paused) {
         sourceVideo.play().catch(() => undefined);
       } else {
         sourceVideo.pause();
       }
+    };
+
+    const onContainerClick = (event) => {
+      if (!(event.target instanceof Element)) return;
+      if (event.target === progress) return;
+      togglePlayPause();
+      showControls();
+    };
+    const onDocumentClick = (event) => {
+      if (!(event.target instanceof Element)) return;
+      if (event.target === progress) return;
+      if (controls.contains(event.target) && event.target !== pipVideo) return;
+      togglePlayPause();
       showControls();
     };
     const onProgressDown = (event) => {
@@ -273,6 +284,8 @@
     const onMouseLeave = () => hideControls();
 
     container.addEventListener("click", onContainerClick, true);
+    pipVideo.addEventListener("click", onContainerClick, true);
+    doc.addEventListener("click", onDocumentClick, true);
     container.addEventListener("mousemove", onMouseMove, { passive: true });
     container.addEventListener("mouseleave", onMouseLeave, { passive: true });
     progress.addEventListener("pointerdown", onProgressDown, true);
@@ -284,6 +297,8 @@
     sourceVideo.addEventListener("loadedmetadata", updateProgress);
 
     STATE.controlUnsubscribers.push(() => container.removeEventListener("click", onContainerClick, true));
+    STATE.controlUnsubscribers.push(() => pipVideo.removeEventListener("click", onContainerClick, true));
+    STATE.controlUnsubscribers.push(() => doc.removeEventListener("click", onDocumentClick, true));
     STATE.controlUnsubscribers.push(() => container.removeEventListener("mousemove", onMouseMove));
     STATE.controlUnsubscribers.push(() => container.removeEventListener("mouseleave", onMouseLeave));
     STATE.controlUnsubscribers.push(() => progress.removeEventListener("pointerdown", onProgressDown, true));

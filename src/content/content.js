@@ -32,6 +32,10 @@
     hiddenSourceOriginalStyle: "",
     laneCount: 0,
     controlUnsubscribers: [],
+    nativeTakeoverInProgress: false,
+    rightHoldTimer: null,
+    rightHoldActive: false,
+    rightHoldPrevRate: 1,
     debug: false
   };
 
@@ -63,6 +67,7 @@
   initStorageWatcher();
   initUrlWatcher();
   initPiPButtonHijack();
+  initNativePiPFallbackHook();
 
   async function startPiP(forcedVideo = null, options = {}) {
     if (STATE.running) return;
@@ -159,56 +164,8 @@
     canvas.style.height = "100%";
     canvas.style.pointerEvents = "none";
 
-    const controls = doc.createElement("div");
-    controls.style.position = "absolute";
-    controls.style.left = "0";
-    controls.style.right = "0";
-    controls.style.bottom = "0";
-    controls.style.height = "42px";
-    controls.style.display = "flex";
-    controls.style.alignItems = "center";
-    controls.style.gap = "6px";
-    controls.style.padding = "4px 8px";
-    controls.style.background = "linear-gradient(transparent, rgba(0,0,0,0.72))";
-    controls.style.zIndex = "9";
-    controls.style.boxSizing = "border-box";
-    controls.style.fontFamily = '"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif';
-
-    const backBtn = makeControlButton(doc, "⏪10");
-    const playPauseBtn = makeControlButton(doc, "⏸");
-    const forwardBtn = makeControlButton(doc, "10⏩");
-    const muteBtn = makeControlButton(doc, "🔊");
-    const volume = doc.createElement("input");
-    volume.type = "range";
-    volume.min = "0";
-    volume.max = "1";
-    volume.step = "0.05";
-    volume.value = String(sourceVideo.muted ? 0 : sourceVideo.volume);
-    volume.style.width = "84px";
-    const speed = doc.createElement("select");
-    ["1", "1.25", "1.5", "2"].forEach((v) => {
-      const option = doc.createElement("option");
-      option.value = v;
-      option.textContent = `${v}x`;
-      speed.appendChild(option);
-    });
-    speed.value = String(sourceVideo.playbackRate || 1);
-    speed.style.height = "28px";
-    speed.style.borderRadius = "6px";
-    speed.style.border = "1px solid rgba(255,255,255,0.35)";
-    speed.style.background = "rgba(20,20,20,0.7)";
-    speed.style.color = "#fff";
-
-    controls.appendChild(backBtn);
-    controls.appendChild(playPauseBtn);
-    controls.appendChild(forwardBtn);
-    controls.appendChild(muteBtn);
-    controls.appendChild(volume);
-    controls.appendChild(speed);
-
     container.appendChild(pipVideo);
     container.appendChild(canvas);
-    container.appendChild(controls);
     doc.body.appendChild(container);
 
     pipWindow.addEventListener("resize", () => resizeCanvas(canvas, pipWindow), { passive: true });
@@ -218,52 +175,6 @@
     STATE.pipVideo = pipVideo;
     STATE.danmakuCanvas = canvas;
     STATE.danmakuCtx = canvas.getContext("2d");
-
-    backBtn.addEventListener("click", () => {
-      sourceVideo.currentTime = Math.max(0, Number(sourceVideo.currentTime || 0) - 10);
-    });
-    playPauseBtn.addEventListener("click", () => {
-      if (sourceVideo.paused) {
-        sourceVideo.play().catch(() => undefined);
-      } else {
-        sourceVideo.pause();
-      }
-    });
-    forwardBtn.addEventListener("click", () => {
-      const max = Number.isFinite(sourceVideo.duration) ? sourceVideo.duration : Number(sourceVideo.currentTime || 0) + 10;
-      sourceVideo.currentTime = Math.min(max, Number(sourceVideo.currentTime || 0) + 10);
-    });
-    muteBtn.addEventListener("click", () => {
-      sourceVideo.muted = !sourceVideo.muted;
-    });
-    volume.addEventListener("input", () => {
-      const v = clampNumber(volume.value, 0, 1, 1);
-      sourceVideo.volume = v;
-      sourceVideo.muted = v === 0;
-    });
-    speed.addEventListener("change", () => {
-      const next = clampNumber(speed.value, 0.5, 4, 1);
-      sourceVideo.playbackRate = next;
-    });
-
-    const syncControls = () => {
-      playPauseBtn.textContent = sourceVideo.paused ? "▶" : "⏸";
-      muteBtn.textContent = sourceVideo.muted || sourceVideo.volume <= 0 ? "🔇" : "🔊";
-      volume.value = String(sourceVideo.muted ? 0 : sourceVideo.volume);
-      speed.value = String(sourceVideo.playbackRate || 1);
-    };
-    syncControls();
-
-    const listeners = [
-      ["play", syncControls],
-      ["pause", syncControls],
-      ["volumechange", syncControls],
-      ["ratechange", syncControls]
-    ];
-    listeners.forEach(([name, fn]) => sourceVideo.addEventListener(name, fn));
-    STATE.controlUnsubscribers.push(() => {
-      listeners.forEach(([name, fn]) => sourceVideo.removeEventListener(name, fn));
-    });
   }
 
   function resizeCanvas(canvas, pipWindow) {
@@ -483,9 +394,41 @@
           event.stopImmediatePropagation();
         }
         const video = findVideoElement();
+        STATE.nativeTakeoverInProgress = true;
         startPiP(video, { skipExitNativePiP: true }).catch((error) => {
           log(`点击PiP按钮接管失败: ${safeError(error)}`);
+        }).finally(() => {
+          STATE.nativeTakeoverInProgress = false;
         });
+      },
+      true
+    );
+  }
+
+  function initNativePiPFallbackHook() {
+    document.addEventListener(
+      "enterpictureinpicture",
+      (event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLVideoElement)) return;
+        if (STATE.running || STATE.nativeTakeoverInProgress) return;
+        STATE.nativeTakeoverInProgress = true;
+        startPiP(target, { skipExitNativePiP: true })
+          .then(async () => {
+            if (document.pictureInPictureElement) {
+              try {
+                await document.exitPictureInPicture();
+              } catch (_error) {
+                // ignore
+              }
+            }
+          })
+          .catch((error) => {
+            log(`原生PiP兜底接管失败: ${safeError(error)}`);
+          })
+          .finally(() => {
+            STATE.nativeTakeoverInProgress = false;
+          });
       },
       true
     );
@@ -758,21 +701,6 @@
     }
   }
 
-  function makeControlButton(doc, label) {
-    const btn = doc.createElement("button");
-    btn.textContent = label;
-    btn.style.height = "30px";
-    btn.style.minWidth = "46px";
-    btn.style.borderRadius = "7px";
-    btn.style.border = "1px solid rgba(255,255,255,0.3)";
-    btn.style.background = "rgba(22,22,22,0.68)";
-    btn.style.color = "#fff";
-    btn.style.cursor = "pointer";
-    btn.style.fontSize = "14px";
-    btn.style.fontWeight = "600";
-    return btn;
-  }
-
   function bindVideoControlEvents() {
     if (!STATE.sourceVideo) return;
     const sync = () => {
@@ -784,9 +712,78 @@
     };
     STATE.sourceVideo.addEventListener("seeked", sync);
     STATE.controlUnsubscribers.push(() => STATE.sourceVideo.removeEventListener("seeked", sync));
+
+    const keyState = { rightPressed: false };
+
+    const onKeyDown = (event) => {
+      if (!STATE.running || !STATE.sourceVideo) return;
+      if (event.code === "Space") {
+        event.preventDefault();
+        if (STATE.sourceVideo.paused) {
+          STATE.sourceVideo.play().catch(() => undefined);
+        } else {
+          STATE.sourceVideo.pause();
+        }
+        return;
+      }
+      if (event.code === "ArrowLeft") {
+        event.preventDefault();
+        if (event.repeat) return;
+        STATE.sourceVideo.currentTime = Math.max(0, Number(STATE.sourceVideo.currentTime || 0) - 5);
+        return;
+      }
+      if (event.code === "ArrowRight") {
+        event.preventDefault();
+        if (event.repeat || keyState.rightPressed) return;
+        keyState.rightPressed = true;
+        clearRightHoldTimer();
+        STATE.rightHoldTimer = setTimeout(() => {
+          if (!keyState.rightPressed || !STATE.sourceVideo) return;
+          STATE.rightHoldActive = true;
+          STATE.rightHoldPrevRate = Number(STATE.sourceVideo.playbackRate || 1);
+          STATE.sourceVideo.playbackRate = 3;
+        }, 240);
+      }
+    };
+
+    const onKeyUp = (event) => {
+      if (!STATE.running || !STATE.sourceVideo) return;
+      if (event.code !== "ArrowRight") return;
+      event.preventDefault();
+      keyState.rightPressed = false;
+      const activated = STATE.rightHoldActive;
+      clearRightHoldTimer();
+      if (activated) {
+        STATE.sourceVideo.playbackRate = clampNumber(STATE.rightHoldPrevRate, 0.5, 4, 1);
+      } else {
+        const max = Number.isFinite(STATE.sourceVideo.duration)
+          ? STATE.sourceVideo.duration
+          : Number(STATE.sourceVideo.currentTime || 0) + 5;
+        STATE.sourceVideo.currentTime = Math.min(max, Number(STATE.sourceVideo.currentTime || 0) + 5);
+      }
+      STATE.rightHoldActive = false;
+    };
+
+    window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("keyup", onKeyUp, true);
+    STATE.controlUnsubscribers.push(() => window.removeEventListener("keydown", onKeyDown, true));
+    STATE.controlUnsubscribers.push(() => window.removeEventListener("keyup", onKeyUp, true));
+    if (STATE.pipWindow) {
+      STATE.pipWindow.addEventListener("keydown", onKeyDown, true);
+      STATE.pipWindow.addEventListener("keyup", onKeyUp, true);
+      STATE.controlUnsubscribers.push(() => STATE.pipWindow.removeEventListener("keydown", onKeyDown, true));
+      STATE.controlUnsubscribers.push(() => STATE.pipWindow.removeEventListener("keyup", onKeyUp, true));
+      try {
+        STATE.pipWindow.focus();
+      } catch (_error) {
+        // ignore
+      }
+    }
   }
 
   function cleanupVideoControlEvents() {
+    clearRightHoldTimer();
+    STATE.rightHoldActive = false;
     STATE.controlUnsubscribers.forEach((fn) => {
       try {
         fn();
@@ -795,6 +792,13 @@
       }
     });
     STATE.controlUnsubscribers = [];
+  }
+
+  function clearRightHoldTimer() {
+    if (STATE.rightHoldTimer) {
+      clearTimeout(STATE.rightHoldTimer);
+      STATE.rightHoldTimer = null;
+    }
   }
 
   function matchesPiPButton(target) {

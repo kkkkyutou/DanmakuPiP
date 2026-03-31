@@ -38,6 +38,8 @@
     rightHoldPrevRate: 1,
     progressDragging: false,
     controlsHideTimer: null,
+    observedVideos: new WeakSet(),
+    videoObserver: null,
     debug: false
   };
 
@@ -70,7 +72,7 @@
   initUrlWatcher();
   initPiPButtonHijack();
   initNativePiPFallbackHook();
-  initRequestPiPInterceptor();
+  initVideoPiPObserver();
 
   async function startPiP(forcedVideo = null, options = {}) {
     if (STATE.running) return;
@@ -462,8 +464,15 @@
       const cid = await getBilibiliCid();
       if (!cid) return [];
       const response = await sendRuntimeMessage({ type: "FETCH_BILIBILI_DANMAKU", cid });
-      if (!response?.ok) throw new Error(response?.error || "加载 B站弹幕失败");
-      return core.normalizeEvents ? core.normalizeEvents(response.events, "bilibili") : response.events;
+      if (response?.ok) {
+        return core.normalizeEvents ? core.normalizeEvents(response.events, "bilibili") : response.events;
+      }
+      if (!String(response?.error || "").includes("412")) {
+        throw new Error(response?.error || "加载 B站弹幕失败");
+      }
+      const xmlText = await fetchBilibiliDanmakuXmlFromPage(cid);
+      const events = parseBilibiliDanmakuXml(xmlText);
+      return core.normalizeEvents ? core.normalizeEvents(events, "bilibili") : events;
     }
 
     if (STATE.site === "youtube") {
@@ -556,56 +565,48 @@
   }
 
   function initNativePiPFallbackHook() {
-    document.addEventListener(
-      "enterpictureinpicture",
-      (event) => {
-        const target = event.target;
-        if (!(target instanceof HTMLVideoElement)) return;
-        if (STATE.running || STATE.nativeTakeoverInProgress) return;
-        STATE.nativeTakeoverInProgress = true;
-        startPiP(target, { skipExitNativePiP: true })
-          .then(async () => {
-            if (document.pictureInPictureElement) {
-              try {
-                await document.exitPictureInPicture();
-              } catch (_error) {
-                // ignore
-              }
-            }
-          })
-          .catch((error) => {
-            log(`原生PiP兜底接管失败: ${safeError(error)}`);
-          })
-          .finally(() => {
-            STATE.nativeTakeoverInProgress = false;
-          });
-      },
-      true
-    );
+    // keep for compatibility; actual robust hook is bound per-video in initVideoPiPObserver.
   }
 
-  function initRequestPiPInterceptor() {
-    const proto = HTMLVideoElement && HTMLVideoElement.prototype;
-    if (!proto || proto.__danmakuPiPPatched) return;
-    const original = proto.requestPictureInPicture;
-    if (typeof original !== "function") return;
-    proto.requestPictureInPicture = function patchedRequestPictureInPicture() {
-      const video = this;
-      if (STATE.running || STATE.nativeTakeoverInProgress) {
-        return original.call(video);
-      }
-      STATE.nativeTakeoverInProgress = true;
-      return startPiP(video, { skipExitNativePiP: true })
-        .then(() => ({ width: video.videoWidth || 0, height: video.videoHeight || 0 }))
-        .catch((error) => {
-          log(`requestPiP拦截失败，回退原生: ${safeError(error)}`);
-          return original.call(video);
-        })
-        .finally(() => {
-          STATE.nativeTakeoverInProgress = false;
-        });
+  function initVideoPiPObserver() {
+    const attach = (video) => {
+      if (!(video instanceof HTMLVideoElement)) return;
+      if (STATE.observedVideos.has(video)) return;
+      STATE.observedVideos.add(video);
+      video.addEventListener(
+        "enterpictureinpicture",
+        () => {
+          if (STATE.running || STATE.nativeTakeoverInProgress) return;
+          STATE.nativeTakeoverInProgress = true;
+          startPiP(video, { skipExitNativePiP: true })
+            .then(async () => {
+              if (document.pictureInPictureElement) {
+                try {
+                  await document.exitPictureInPicture();
+                } catch (_error) {
+                  // ignore
+                }
+              }
+            })
+            .catch((error) => {
+              log(`视频级PiP接管失败: ${safeError(error)}`);
+            })
+            .finally(() => {
+              STATE.nativeTakeoverInProgress = false;
+            });
+        },
+        true
+      );
     };
-    proto.__danmakuPiPPatched = true;
+    document.querySelectorAll("video").forEach(attach);
+    if (STATE.videoObserver) STATE.videoObserver.disconnect();
+    STATE.videoObserver = new MutationObserver(() => {
+      document.querySelectorAll("video").forEach(attach);
+    });
+    STATE.videoObserver.observe(document.documentElement || document.body, {
+      subtree: true,
+      childList: true
+    });
   }
 
   async function loadSettings() {
@@ -982,6 +983,74 @@
       clearTimeout(STATE.controlsHideTimer);
       STATE.controlsHideTimer = null;
     }
+  }
+
+  async function fetchBilibiliDanmakuXmlFromPage(cid) {
+    const requestId = `dmp_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const eventName = `DanmakuPiP:DMXML:${requestId}`;
+    const url = `https://api.bilibili.com/x/v1/dm/list.so?oid=${encodeURIComponent(String(cid))}`;
+    return new Promise((resolve, reject) => {
+      const cleanup = () => {
+        window.removeEventListener(eventName, onResult);
+      };
+      const onResult = (event) => {
+        cleanup();
+        const detail = event.detail || {};
+        if (!detail.ok) {
+          reject(new Error(`页面上下文获取 B站弹幕失败: ${detail.status || "unknown"}`));
+          return;
+        }
+        resolve(String(detail.text || ""));
+      };
+      window.addEventListener(eventName, onResult, { once: true });
+      const script = document.createElement("script");
+      script.textContent = `
+        (async function () {
+          try {
+            const res = await fetch(${JSON.stringify(url)}, { credentials: "include" });
+            const text = await res.text();
+            window.dispatchEvent(new CustomEvent(${JSON.stringify(eventName)}, {
+              detail: { ok: res.ok, status: res.status, text: text }
+            }));
+          } catch (e) {
+            window.dispatchEvent(new CustomEvent(${JSON.stringify(eventName)}, {
+              detail: { ok: false, status: "network", text: "", error: String(e) }
+            }));
+          }
+        })();
+      `;
+      (document.documentElement || document.head || document.body).appendChild(script);
+      script.remove();
+      setTimeout(() => {
+        cleanup();
+        reject(new Error("页面上下文获取 B站弹幕超时"));
+      }, 8000);
+    });
+  }
+
+  function parseBilibiliDanmakuXml(xmlText) {
+    const doc = new DOMParser().parseFromString(xmlText, "text/xml");
+    const dNodes = Array.from(doc.querySelectorAll("d"));
+    return dNodes
+      .map((node, index) => {
+        const p = node.getAttribute("p");
+        if (!p) return null;
+        const parts = p.split(",");
+        const t = Number(parts[0]);
+        const modeNum = Number(parts[1]);
+        const color = `#${Number(parts[3] || 16777215).toString(16).padStart(6, "0")}`;
+        const text = (node.textContent || "").trim();
+        if (!text || Number.isNaN(t)) return null;
+        return {
+          id: `bili-page-${index}`,
+          source: "bilibili",
+          t,
+          mode: modeNum === 5 ? "top" : modeNum === 4 ? "bottom" : "scroll",
+          color,
+          text
+        };
+      })
+      .filter(Boolean);
   }
 
   function formatTime(totalSec) {

@@ -3,6 +3,7 @@ const ids = {
   opacity: document.getElementById("opacity"),
   speed: document.getElementById("speed"),
   density: document.getElementById("density"),
+  maxFps: document.getElementById("maxFps"),
   blockedKeywords: document.getElementById("blockedKeywords"),
   debug: document.getElementById("debug"),
   saveBtn: document.getElementById("saveBtn"),
@@ -14,6 +15,7 @@ const DEFAULTS = {
   opacity: 0.9,
   speed: 140,
   density: 50,
+  maxFps: 30,
   blockedKeywords: [],
   debug: false
 };
@@ -27,6 +29,7 @@ async function init() {
   ids.opacity.value = data.opacity;
   ids.speed.value = data.speed;
   ids.density.value = data.density;
+  ids.maxFps.value = data.maxFps;
   ids.blockedKeywords.value = (data.blockedKeywords || []).join(", ");
   ids.debug.checked = Boolean(data.debug);
 }
@@ -42,6 +45,7 @@ async function save() {
     opacity: toNum(ids.opacity.value, 0.9),
     speed: toNum(ids.speed.value, 140),
     density: toNum(ids.density.value, 50),
+    maxFps: toNum(ids.maxFps.value, 30),
     blockedKeywords: keywords,
     debug: ids.debug.checked
   };

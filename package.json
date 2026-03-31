@@ -1,0 +1,11 @@
+{
+  "name": "danmakupip",
+  "version": "1.2.0",
+  "private": true,
+  "description": "Lightweight PiP danmaku extension for Bilibili and YouTube.",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "check:syntax": "node --check src/background/service-worker.js && node --check src/content/content.js && node --check src/popup/popup.js && node --check src/options/options.js",
+    "package": "bash scripts/package.sh"
+  }
+}

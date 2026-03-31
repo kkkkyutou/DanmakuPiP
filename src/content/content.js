@@ -77,6 +77,7 @@
   initPiPButtonHijack();
   initNativePiPFallbackHook();
   initVideoPiPObserver();
+  initPageRequestPiPHook();
 
   async function startPiP(forcedVideo = null, options = {}) {
     if (STATE.running) return;
@@ -635,6 +636,69 @@
       subtree: true,
       childList: true
     });
+  }
+
+  function initPageRequestPiPHook() {
+    const eventName = "DanmakuPiP:NativeRequestPiP";
+    window.addEventListener(
+      eventName,
+      (event) => {
+        if (STATE.running || STATE.nativeTakeoverInProgress) return;
+        const detail = event.detail || {};
+        const id = detail.id ? String(detail.id) : "";
+        let video = null;
+        if (id) {
+          video = document.querySelector(`video[data-dmp-hook-id="${escapeAttrValue(id)}"]`);
+        }
+        if (!(video instanceof HTMLVideoElement)) {
+          video = findVideoElement();
+        }
+        if (!(video instanceof HTMLVideoElement)) return;
+        event.preventDefault();
+        STATE.nativeTakeoverInProgress = true;
+        startPiP(video, { skipExitNativePiP: true })
+          .catch((error) => {
+            log(`页面requestPiP接管失败: ${safeError(error)}`);
+          })
+          .finally(() => {
+            STATE.nativeTakeoverInProgress = false;
+          });
+      },
+      true
+    );
+
+    const script = document.createElement("script");
+    script.textContent = `
+      (function () {
+        if (window.__danmakuPiPHooked) return;
+        window.__danmakuPiPHooked = true;
+        const eventName = ${JSON.stringify(eventName)};
+        const proto = HTMLVideoElement && HTMLVideoElement.prototype;
+        if (!proto) return;
+        const original = proto.requestPictureInPicture;
+        if (typeof original !== "function") return;
+        let seq = 0;
+        proto.requestPictureInPicture = function patchedRequestPiP() {
+          let id = this.getAttribute("data-dmp-hook-id");
+          if (!id) {
+            id = "dmp_" + Date.now() + "_" + (++seq);
+            this.setAttribute("data-dmp-hook-id", id);
+          }
+          const evt = new CustomEvent(eventName, {
+            bubbles: true,
+            cancelable: true,
+            detail: { id: id }
+          });
+          window.dispatchEvent(evt);
+          if (evt.defaultPrevented) {
+            return Promise.resolve(null);
+          }
+          return original.call(this);
+        };
+      })();
+    `;
+    (document.documentElement || document.head || document.body).appendChild(script);
+    script.remove();
   }
 
   function initBiliLiveDomBridge() {
@@ -1222,6 +1286,10 @@
       return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
     }
     return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  }
+
+  function escapeAttrValue(text) {
+    return String(text).replace(/"/g, '\\"');
   }
 
   function matchesPiPButton(target) {

@@ -36,6 +36,8 @@
     rightHoldTimer: null,
     rightHoldActive: false,
     rightHoldPrevRate: 1,
+    progressDragging: false,
+    controlsHideTimer: null,
     debug: false
   };
 
@@ -68,6 +70,7 @@
   initUrlWatcher();
   initPiPButtonHijack();
   initNativePiPFallbackHook();
+  initRequestPiPInterceptor();
 
   async function startPiP(forcedVideo = null, options = {}) {
     if (STATE.running) return;
@@ -164,8 +167,47 @@
     canvas.style.height = "100%";
     canvas.style.pointerEvents = "none";
 
+    const controls = doc.createElement("div");
+    controls.style.position = "absolute";
+    controls.style.left = "8px";
+    controls.style.right = "8px";
+    controls.style.bottom = "8px";
+    controls.style.height = "36px";
+    controls.style.display = "flex";
+    controls.style.alignItems = "center";
+    controls.style.gap = "8px";
+    controls.style.padding = "0 10px";
+    controls.style.borderRadius = "9px";
+    controls.style.background = "rgba(16,16,16,0.68)";
+    controls.style.opacity = "0";
+    controls.style.transition = "opacity 120ms ease";
+    controls.style.pointerEvents = "none";
+    controls.style.zIndex = "12";
+    controls.style.boxSizing = "border-box";
+    controls.style.fontFamily = '"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif';
+
+    const progress = doc.createElement("input");
+    progress.type = "range";
+    progress.min = "0";
+    progress.max = "1000";
+    progress.step = "1";
+    progress.value = "0";
+    progress.style.flex = "1";
+    progress.style.height = "20px";
+    progress.style.margin = "0";
+
+    const timeLabel = doc.createElement("span");
+    timeLabel.textContent = "00:00 / 00:00";
+    timeLabel.style.color = "#fff";
+    timeLabel.style.fontSize = "12px";
+    timeLabel.style.minWidth = "96px";
+    timeLabel.style.textAlign = "right";
+
     container.appendChild(pipVideo);
     container.appendChild(canvas);
+    controls.appendChild(progress);
+    controls.appendChild(timeLabel);
+    container.appendChild(controls);
     doc.body.appendChild(container);
 
     pipWindow.addEventListener("resize", () => resizeCanvas(canvas, pipWindow), { passive: true });
@@ -175,6 +217,82 @@
     STATE.pipVideo = pipVideo;
     STATE.danmakuCanvas = canvas;
     STATE.danmakuCtx = canvas.getContext("2d");
+
+    const updateProgress = () => {
+      if (STATE.progressDragging) return;
+      const duration = Number(sourceVideo.duration || 0);
+      const current = Number(sourceVideo.currentTime || 0);
+      const ratio = duration > 0 ? Math.min(1, Math.max(0, current / duration)) : 0;
+      progress.value = String(Math.round(ratio * 1000));
+      timeLabel.textContent = `${formatTime(current)} / ${formatTime(duration)}`;
+    };
+    updateProgress();
+
+    const setProgressVisible = (visible) => {
+      controls.style.opacity = visible ? "1" : "0";
+      controls.style.pointerEvents = visible ? "auto" : "none";
+    };
+    const showControls = () => {
+      setProgressVisible(true);
+      clearControlsHideTimer();
+      STATE.controlsHideTimer = setTimeout(() => {
+        if (!STATE.progressDragging) setProgressVisible(false);
+      }, 1500);
+    };
+    const hideControls = () => {
+      if (!STATE.progressDragging) setProgressVisible(false);
+    };
+
+    const onContainerClick = (event) => {
+      if (!(event.target instanceof Element)) return;
+      if (event.target === progress) return;
+      if (sourceVideo.paused) {
+        sourceVideo.play().catch(() => undefined);
+      } else {
+        sourceVideo.pause();
+      }
+      showControls();
+    };
+    const onProgressDown = (event) => {
+      event.stopPropagation();
+      STATE.progressDragging = true;
+      showControls();
+    };
+    const onProgressInput = (event) => {
+      event.stopPropagation();
+      const duration = Number(sourceVideo.duration || 0);
+      if (!(duration > 0)) return;
+      const ratio = clampNumber(progress.value, 0, 1000, 0) / 1000;
+      sourceVideo.currentTime = duration * ratio;
+    };
+    const onProgressUp = () => {
+      STATE.progressDragging = false;
+      showControls();
+    };
+    const onMouseMove = () => showControls();
+    const onMouseLeave = () => hideControls();
+
+    container.addEventListener("click", onContainerClick, true);
+    container.addEventListener("mousemove", onMouseMove, { passive: true });
+    container.addEventListener("mouseleave", onMouseLeave, { passive: true });
+    progress.addEventListener("pointerdown", onProgressDown, true);
+    progress.addEventListener("input", onProgressInput, true);
+    progress.addEventListener("pointerup", onProgressUp, true);
+    progress.addEventListener("change", onProgressUp, true);
+    sourceVideo.addEventListener("timeupdate", updateProgress);
+    sourceVideo.addEventListener("durationchange", updateProgress);
+    sourceVideo.addEventListener("loadedmetadata", updateProgress);
+
+    STATE.controlUnsubscribers.push(() => container.removeEventListener("click", onContainerClick, true));
+    STATE.controlUnsubscribers.push(() => container.removeEventListener("mousemove", onMouseMove));
+    STATE.controlUnsubscribers.push(() => container.removeEventListener("mouseleave", onMouseLeave));
+    STATE.controlUnsubscribers.push(() => progress.removeEventListener("pointerdown", onProgressDown, true));
+    STATE.controlUnsubscribers.push(() => progress.removeEventListener("input", onProgressInput, true));
+    STATE.controlUnsubscribers.push(() => progress.removeEventListener("pointerup", onProgressUp, true));
+    STATE.controlUnsubscribers.push(() => progress.removeEventListener("change", onProgressUp, true));
+    STATE.controlUnsubscribers.push(() => sourceVideo.removeEventListener("timeupdate", updateProgress));
+    STATE.controlUnsubscribers.push(() => sourceVideo.removeEventListener("durationchange", updateProgress));
+    STATE.controlUnsubscribers.push(() => sourceVideo.removeEventListener("loadedmetadata", updateProgress));
   }
 
   function resizeCanvas(canvas, pipWindow) {
@@ -432,6 +550,30 @@
       },
       true
     );
+  }
+
+  function initRequestPiPInterceptor() {
+    const proto = HTMLVideoElement && HTMLVideoElement.prototype;
+    if (!proto || proto.__danmakuPiPPatched) return;
+    const original = proto.requestPictureInPicture;
+    if (typeof original !== "function") return;
+    proto.requestPictureInPicture = function patchedRequestPictureInPicture() {
+      const video = this;
+      if (STATE.running || STATE.nativeTakeoverInProgress) {
+        return original.call(video);
+      }
+      STATE.nativeTakeoverInProgress = true;
+      return startPiP(video, { skipExitNativePiP: true })
+        .then(() => ({ width: video.videoWidth || 0, height: video.videoHeight || 0 }))
+        .catch((error) => {
+          log(`requestPiP拦截失败，回退原生: ${safeError(error)}`);
+          return original.call(video);
+        })
+        .finally(() => {
+          STATE.nativeTakeoverInProgress = false;
+        });
+    };
+    proto.__danmakuPiPPatched = true;
   }
 
   async function loadSettings() {
@@ -783,7 +925,9 @@
 
   function cleanupVideoControlEvents() {
     clearRightHoldTimer();
+    clearControlsHideTimer();
     STATE.rightHoldActive = false;
+    STATE.progressDragging = false;
     STATE.controlUnsubscribers.forEach((fn) => {
       try {
         fn();
@@ -799,6 +943,24 @@
       clearTimeout(STATE.rightHoldTimer);
       STATE.rightHoldTimer = null;
     }
+  }
+
+  function clearControlsHideTimer() {
+    if (STATE.controlsHideTimer) {
+      clearTimeout(STATE.controlsHideTimer);
+      STATE.controlsHideTimer = null;
+    }
+  }
+
+  function formatTime(totalSec) {
+    const sec = Math.max(0, Math.floor(Number(totalSec || 0)));
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = sec % 60;
+    if (h > 0) {
+      return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+    }
+    return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
   }
 
   function matchesPiPButton(target) {
